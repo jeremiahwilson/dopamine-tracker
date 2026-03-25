@@ -1,16 +1,73 @@
-// ─── Storage ────────────────────────────────────────────────────────────────
+// ─── Supabase Client ─────────────────────────────────────────────────────────
 
-const KEY = { items: 'dp_items', schedule: 'dp_schedule', log: 'dp_log' };
+const { createClient } = window.supabase;
+const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-function load(key)      { try { return JSON.parse(localStorage.getItem(key)) || []; } catch { return []; } }
-function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
-function uid()          { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+// ─── Mappers (DB snake_case → JS camelCase) ───────────────────────────────────
 
-const getItems    = () => load(KEY.items);
-const getSchedule = () => load(KEY.schedule);
-const getLog      = () => load(KEY.log);
+function mapItem(row) {
+  return {
+    id:       row.id,
+    name:     row.name,
+    type:     row.type,
+    effort:   parseFloat(row.effort),
+    dopamine: parseFloat(row.dopamine),
+  };
+}
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+function mapScheduleEntry(row) {
+  return {
+    id:          row.id,
+    date:        row.date,
+    itemId:      row.item_id,
+    durationMin: row.duration_min,
+    order:       row.position,
+  };
+}
+
+function mapLogEntry(row) {
+  return {
+    id:          row.id,
+    date:        row.date,
+    itemId:      row.item_id,
+    startTime:   row.start_time || '',
+    durationMin: row.duration_min,
+  };
+}
+
+// ─── Data Access ─────────────────────────────────────────────────────────────
+
+async function getItems() {
+  const { data, error } = await db.from('items').select('*').order('created_at');
+  if (error) { console.error('getItems:', error); return []; }
+  return data.map(mapItem);
+}
+
+async function getScheduleForDate(date) {
+  const { data, error } = await db
+    .from('schedule_entries').select('*')
+    .eq('date', date).order('position');
+  if (error) { console.error('getScheduleForDate:', error); return []; }
+  return data.map(mapScheduleEntry);
+}
+
+async function getLogForDate(date) {
+  const { data, error } = await db
+    .from('log_entries').select('*')
+    .eq('date', date);
+  if (error) { console.error('getLogForDate:', error); return []; }
+  return data.map(mapLogEntry);
+}
+
+async function getLogForDateRange(startDate, endDate) {
+  const { data, error } = await db
+    .from('log_entries').select('*')
+    .gte('date', startDate).lte('date', endDate);
+  if (error) { console.error('getLogForDateRange:', error); return []; }
+  return data.map(mapLogEntry);
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function esc(str) {
   return String(str)
@@ -18,44 +75,59 @@ function esc(str) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// Quality = effort >= 5 (right side of graph)
 function isQuality(item) { return item.effort >= 5; }
 
-function itemMap() {
-  return Object.fromEntries(getItems().map(i => [i.id, i]));
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+
+function sortByStartTime(entries) {
+  return [...entries].sort((a, b) => {
+    if (a.startTime && b.startTime) return a.startTime.localeCompare(b.startTime);
+    if (a.startTime) return -1;
+    if (b.startTime) return 1;
+    return 0;
+  });
 }
 
-// ─── Items Tab ──────────────────────────────────────────────────────────────
+function calcQualityBeforeCheap(entries, map) {
+  let minutes = 0;
+  for (const e of entries) {
+    const item = map[e.itemId];
+    if (!item) continue;
+    if (isQuality(item)) { minutes += e.durationMin; }
+    else                 { break; }
+  }
+  return minutes;
+}
 
-function addItem() {
+// ─── Items Tab ───────────────────────────────────────────────────────────────
+
+async function addItem() {
   const name     = document.getElementById('item-name').value.trim();
   const type     = document.getElementById('item-type').value;
   const effort   = parseFloat(document.getElementById('item-effort').value);
   const dopamine = parseFloat(document.getElementById('item-dopamine').value);
 
-  if (!name)                                                    return alert('Please enter a name.');
-  if (isNaN(effort)   || effort < 0   || effort > 10)          return alert('Effort must be 0–10.');
-  if (isNaN(dopamine) || dopamine < 0 || dopamine > 10)        return alert('Dopamine must be 0–10.');
+  if (!name)                                             return alert('Please enter a name.');
+  if (isNaN(effort)   || effort < 0   || effort > 10)   return alert('Effort must be 0–10.');
+  if (isNaN(dopamine) || dopamine < 0 || dopamine > 10) return alert('Dopamine must be 0–10.');
 
-  const items = getItems();
-  items.push({ id: uid(), name, type, effort, dopamine });
-  save(KEY.items, items);
+  const { error } = await db.from('items').insert({ id: uid(), name, type, effort, dopamine });
+  if (error) { alert('Error saving item.'); console.error(error); return; }
 
   document.getElementById('item-name').value = '';
-  renderItems();
-  refreshSelects();
+  await Promise.all([renderItems(), refreshSelects()]);
 }
 
-function deleteItem(id) {
+async function deleteItem(id) {
   if (!confirm('Delete this item? It will still appear in existing schedule/log entries.')) return;
-  save(KEY.items, getItems().filter(i => i.id !== id));
-  renderItems();
-  refreshSelects();
+  const { error } = await db.from('items').delete().eq('id', id);
+  if (error) { alert('Error deleting item.'); console.error(error); return; }
+  await Promise.all([renderItems(), refreshSelects()]);
 }
 
-function renderItems() {
-  const items = getItems();
-  const el = document.getElementById('items-list');
+async function renderItems() {
+  const items = await getItems();
+  const el    = document.getElementById('items-list');
 
   if (!items.length) {
     el.innerHTML = '<div class="empty">No items yet. Add one above to get started.</div>';
@@ -65,9 +137,7 @@ function renderItems() {
   el.innerHTML = `
     <table>
       <thead>
-        <tr>
-          <th>Name</th><th>Type</th><th>Effort</th><th>Dopamine</th><th>Zone</th><th></th>
-        </tr>
+        <tr><th>Name</th><th>Type</th><th>Effort</th><th>Dopamine</th><th>Zone</th><th></th></tr>
       </thead>
       <tbody>
         ${items.map(item => `
@@ -99,12 +169,12 @@ function renderItems() {
   `;
 }
 
-// ─── Graph Tab ──────────────────────────────────────────────────────────────
+// ─── Graph Tab ───────────────────────────────────────────────────────────────
 
 let graphChart = null;
 
-function renderGraph() {
-  const items  = getItems();
+async function renderGraph() {
+  const items  = await getItems();
   const canvas = document.getElementById('graph-canvas');
 
   if (graphChart) { graphChart.destroy(); graphChart = null; }
@@ -112,7 +182,6 @@ function renderGraph() {
   const quality = items.filter(i =>  isQuality(i)).map(i => ({ x: i.effort, y: i.dopamine, name: i.name }));
   const cheap   = items.filter(i => !isQuality(i)).map(i => ({ x: i.effort, y: i.dopamine, name: i.name }));
 
-  // Plugin: draw labels above each point
   const labelPlugin = {
     id: 'pointLabels',
     afterDatasetsDraw(chart) {
@@ -126,16 +195,13 @@ function renderGraph() {
         if (meta.hidden) return;
         meta.data.forEach((el, pi) => {
           const point = ds.data[pi];
-          if (point && point.name) {
-            ctx.fillText(point.name, el.x, el.y - 11);
-          }
+          if (point && point.name) ctx.fillText(point.name, el.x, el.y - 11);
         });
       });
       ctx.restore();
     }
   };
 
-  // Plugin: dashed divider line at effort=5
   const dividerPlugin = {
     id: 'divider',
     beforeDraw(chart) {
@@ -210,9 +276,9 @@ function renderGraph() {
   });
 }
 
-// ─── Schedule Tab ───────────────────────────────────────────────────────────
+// ─── Schedule Tab ─────────────────────────────────────────────────────────────
 
-function addScheduleEntry() {
+async function addScheduleEntry() {
   const date     = document.getElementById('schedule-date').value;
   const itemId   = document.getElementById('schedule-item-select').value;
   const duration = parseInt(document.getElementById('schedule-duration').value);
@@ -221,43 +287,55 @@ function addScheduleEntry() {
   if (!itemId)                   return alert('Please select an item.');
   if (!duration || duration < 1) return alert('Please enter a valid duration.');
 
-  const entries    = getSchedule();
-  const dayEntries = entries.filter(e => e.date === date);
-  const maxOrder   = dayEntries.length ? Math.max(...dayEntries.map(e => e.order)) : -1;
+  const existing   = await getScheduleForDate(date);
+  const maxPosition = existing.length ? Math.max(...existing.map(e => e.order)) : -1;
 
-  entries.push({ id: uid(), date, itemId, durationMin: duration, order: maxOrder + 1 });
-  save(KEY.schedule, entries);
-  renderSchedule();
+  const { error } = await db.from('schedule_entries').insert({
+    id: uid(), date, item_id: itemId, duration_min: duration, position: maxPosition + 1
+  });
+  if (error) { alert('Error saving entry.'); console.error(error); return; }
+
+  await renderSchedule();
 }
 
-function deleteScheduleEntry(id) {
-  save(KEY.schedule, getSchedule().filter(e => e.id !== id));
-  renderSchedule();
+async function deleteScheduleEntry(id) {
+  const { error } = await db.from('schedule_entries').delete().eq('id', id);
+  if (error) { alert('Error deleting entry.'); console.error(error); return; }
+  await renderSchedule();
 }
 
-function moveScheduleEntry(id, dir) {
+async function moveScheduleEntry(id, dir) {
   const date    = document.getElementById('schedule-date').value;
-  const entries = getSchedule();
-  const day     = entries.filter(e => e.date === date).sort((a, b) => a.order - b.order);
-  const idx     = day.findIndex(e => e.id === id);
+  const entries = await getScheduleForDate(date); // already sorted by position
+  const idx     = entries.findIndex(e => e.id === id);
 
   if (dir === 'up'   && idx === 0)              return;
-  if (dir === 'down' && idx === day.length - 1) return;
+  if (dir === 'down' && idx === entries.length - 1) return;
 
-  const swapIdx = dir === 'up' ? idx - 1 : idx + 1;
-  [day[idx].order, day[swapIdx].order] = [day[swapIdx].order, day[idx].order];
-  save(KEY.schedule, entries);
-  renderSchedule();
+  const swapIdx  = dir === 'up' ? idx - 1 : idx + 1;
+  const posA     = entries[idx].order;
+  const posB     = entries[swapIdx].order;
+
+  const { error } = await Promise.all([
+    db.from('schedule_entries').update({ position: posB }).eq('id', entries[idx].id),
+    db.from('schedule_entries').update({ position: posA }).eq('id', entries[swapIdx].id),
+  ]).then(results => results.find(r => r.error) || { error: null });
+
+  if (error) { console.error('moveScheduleEntry:', error); return; }
+  await renderSchedule();
 }
 
-function renderSchedule() {
+async function renderSchedule() {
   const date = document.getElementById('schedule-date').value;
   const el   = document.getElementById('schedule-list');
 
   if (!date) { el.innerHTML = '<div class="empty">Select a date above.</div>'; return; }
 
-  const map     = itemMap();
-  const entries = getSchedule().filter(e => e.date === date).sort((a, b) => a.order - b.order);
+  const [entries, items] = await Promise.all([
+    getScheduleForDate(date),
+    getItems(),
+  ]);
+  const map = Object.fromEntries(items.map(i => [i.id, i]));
 
   if (!entries.length) {
     el.innerHTML = '<div class="empty">Nothing planned for this day yet.</div>';
@@ -300,9 +378,9 @@ function renderSchedule() {
   `;
 }
 
-// ─── Log Tab ────────────────────────────────────────────────────────────────
+// ─── Log Tab ─────────────────────────────────────────────────────────────────
 
-function addLogEntry() {
+async function addLogEntry() {
   const date      = document.getElementById('log-date').value;
   const itemId    = document.getElementById('log-item-select').value;
   const startTime = document.getElementById('log-start-time').value;
@@ -312,47 +390,29 @@ function addLogEntry() {
   if (!itemId)                   return alert('Please select an item.');
   if (!duration || duration < 1) return alert('Please enter a valid duration.');
 
-  const entries = getLog();
-  entries.push({ id: uid(), date, itemId, startTime: startTime || '', durationMin: duration });
-  save(KEY.log, entries);
-  renderLog();
+  const { error } = await db.from('log_entries').insert({
+    id: uid(), date, item_id: itemId, start_time: startTime || null, duration_min: duration
+  });
+  if (error) { alert('Error saving entry.'); console.error(error); return; }
+
+  await renderLog();
 }
 
-function deleteLogEntry(id) {
-  save(KEY.log, getLog().filter(e => e.id !== id));
-  renderLog();
+async function deleteLogEntry(id) {
+  const { error } = await db.from('log_entries').delete().eq('id', id);
+  if (error) { alert('Error deleting entry.'); console.error(error); return; }
+  await renderLog();
 }
 
-function sortedDayLog(date) {
-  return getLog()
-    .filter(e => e.date === date)
-    .sort((a, b) => {
-      if (a.startTime && b.startTime) return a.startTime.localeCompare(b.startTime);
-      if (a.startTime) return -1;
-      if (b.startTime) return 1;
-      return 0;
-    });
-}
-
-function calcQualityBeforeCheap(entries, map) {
-  let minutes = 0;
-  for (const e of entries) {
-    const item = map[e.itemId];
-    if (!item) continue;
-    if (isQuality(item)) { minutes += e.durationMin; }
-    else                 { break; }
-  }
-  return minutes;
-}
-
-function renderLog() {
+async function renderLog() {
   const date = document.getElementById('log-date').value;
   const el   = document.getElementById('log-list');
 
   if (!date) { el.innerHTML = '<div class="empty">Select a date above.</div>'; return; }
 
-  const map     = itemMap();
-  const entries = sortedDayLog(date);
+  const [rawEntries, items] = await Promise.all([getLogForDate(date), getItems()]);
+  const map     = Object.fromEntries(items.map(i => [i.id, i]));
+  const entries = sortByStartTime(rawEntries);
 
   if (!entries.length) {
     el.innerHTML = '<div class="empty">Nothing logged for this day yet.</div>';
@@ -401,7 +461,7 @@ function renderLog() {
   `;
 }
 
-// ─── Trendline Tab ──────────────────────────────────────────────────────────
+// ─── Trendline Tab ────────────────────────────────────────────────────────────
 
 let trendChart = null;
 let trendRange = 'week';
@@ -413,13 +473,23 @@ function setTrendRange(range, btn) {
   renderTrendline();
 }
 
-function renderTrendline() {
-  const days    = trendRange === 'week' ? 7 : trendRange === 'month' ? 30 : 365;
-  const canvas  = document.getElementById('trend-canvas');
-  const map     = itemMap();
-  const logData = getLog();
+async function renderTrendline() {
+  const days   = trendRange === 'week' ? 7 : trendRange === 'month' ? 30 : 365;
+  const canvas = document.getElementById('trend-canvas');
 
-  const today = new Date();
+  const today     = new Date();
+  const endDate   = today.toISOString().split('T')[0];
+  const startDay  = new Date(today);
+  startDay.setDate(startDay.getDate() - (days - 1));
+  const startDate = startDay.toISOString().split('T')[0];
+
+  const [logEntries, items] = await Promise.all([
+    getLogForDateRange(startDate, endDate),
+    getItems(),
+  ]);
+  const map = Object.fromEntries(items.map(i => [i.id, i]));
+
+  // Build full date range (fill in days with no logs as 0)
   const dates = Array.from({ length: days }, (_, i) => {
     const d = new Date(today);
     d.setDate(d.getDate() - (days - 1 - i));
@@ -427,14 +497,7 @@ function renderTrendline() {
   });
 
   const values = dates.map(date => {
-    const entries = logData
-      .filter(e => e.date === date)
-      .sort((a, b) => {
-        if (a.startTime && b.startTime) return a.startTime.localeCompare(b.startTime);
-        if (a.startTime) return -1;
-        if (b.startTime) return 1;
-        return 0;
-      });
+    const entries = sortByStartTime(logEntries.filter(e => e.date === date));
     return calcQualityBeforeCheap(entries, map);
   });
 
@@ -470,26 +533,20 @@ function renderTrendline() {
           title: { display: true, text: 'Minutes of quality activity', font: { size: 12 } },
           ticks: { stepSize: 30 }
         },
-        x: {
-          title: { display: true, text: 'Date', font: { size: 12 } }
-        }
+        x: { title: { display: true, text: 'Date', font: { size: 12 } } }
       },
       plugins: {
         legend: { position: 'bottom' },
-        tooltip: {
-          callbacks: {
-            label: ctx => `${ctx.raw} min of quality time`
-          }
-        }
+        tooltip: { callbacks: { label: ctx => `${ctx.raw} min of quality time` } }
       }
     }
   });
 }
 
-// ─── Shared ─────────────────────────────────────────────────────────────────
+// ─── Shared ───────────────────────────────────────────────────────────────────
 
-function refreshSelects() {
-  const items = getItems();
+async function refreshSelects() {
+  const items = await getItems();
   const opts  = items.map(i =>
     `<option value="${i.id}">${esc(i.name)} (E:${i.effort.toFixed(1)} / D:${i.dopamine.toFixed(1)})</option>`
   ).join('');
@@ -510,9 +567,9 @@ function switchTab(tab) {
   if (tab === 'trendline') renderTrendline();
 }
 
-// ─── Init ────────────────────────────────────────────────────────────────────
+// ─── Init ─────────────────────────────────────────────────────────────────────
 
-(function init() {
+(async function init() {
   const today = new Date().toISOString().split('T')[0];
   document.getElementById('schedule-date').value = today;
   document.getElementById('log-date').value      = today;
@@ -521,8 +578,5 @@ function switchTab(tab) {
   document.getElementById('log-start-time').value =
     String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
-  renderItems();
-  renderSchedule();
-  renderLog();
-  refreshSelects();
+  await Promise.all([renderItems(), renderSchedule(), renderLog(), refreshSelects()]);
 })();
