@@ -111,7 +111,8 @@ async function addItem() {
   if (isNaN(effort)   || effort < 0   || effort > 10)   return alert('Effort must be 0–10.');
   if (isNaN(dopamine) || dopamine < 0 || dopamine > 10) return alert('Dopamine must be 0–10.');
 
-  const { error } = await db.from('items').insert({ id: uid(), name, type, effort, dopamine });
+  const { data: { user } } = await db.auth.getUser();
+  const { error } = await db.from('items').insert({ id: uid(), name, type, effort, dopamine, user_id: user.id });
   if (error) { alert('Error saving item.'); console.error(error); return; }
 
   document.getElementById('item-name').value = '';
@@ -290,8 +291,9 @@ async function addScheduleEntry() {
   const existing   = await getScheduleForDate(date);
   const maxPosition = existing.length ? Math.max(...existing.map(e => e.order)) : -1;
 
+  const { data: { user } } = await db.auth.getUser();
   const { error } = await db.from('schedule_entries').insert({
-    id: uid(), date, item_id: itemId, duration_min: duration, position: maxPosition + 1
+    id: uid(), date, item_id: itemId, duration_min: duration, position: maxPosition + 1, user_id: user.id
   });
   if (error) { alert('Error saving entry.'); console.error(error); return; }
 
@@ -390,8 +392,9 @@ async function addLogEntry() {
   if (!itemId)                   return alert('Please select an item.');
   if (!duration || duration < 1) return alert('Please enter a valid duration.');
 
+  const { data: { user } } = await db.auth.getUser();
   const { error } = await db.from('log_entries').insert({
-    id: uid(), date, item_id: itemId, start_time: startTime || null, duration_min: duration
+    id: uid(), date, item_id: itemId, start_time: startTime || null, duration_min: duration, user_id: user.id
   });
   if (error) { alert('Error saving entry.'); console.error(error); return; }
 
@@ -570,6 +573,13 @@ function switchTab(tab) {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 (async function init() {
+  // Ensure the user has a session (anonymous if first visit, existing if returning)
+  const { data: { session } } = await db.auth.getSession();
+  if (!session) {
+    const { error } = await db.auth.signInAnonymously();
+    if (error) { console.error('Auth error:', error); return; }
+  }
+
   const today = new Date().toISOString().split('T')[0];
   document.getElementById('schedule-date').value = today;
   document.getElementById('log-date').value      = today;
