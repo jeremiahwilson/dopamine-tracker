@@ -546,6 +546,124 @@ async function renderTrendline() {
   });
 }
 
+// ─── Auth Modal ───────────────────────────────────────────────────────────────
+
+function openAuthModal() {
+  document.getElementById('auth-overlay').classList.remove('hidden');
+  renderAuthModal();
+}
+
+function closeAuthModal() {
+  document.getElementById('auth-overlay').classList.add('hidden');
+}
+
+function closeAuthModalIfOutside(e) {
+  if (e.target === document.getElementById('auth-overlay')) closeAuthModal();
+}
+
+async function renderAuthModal(activeTab = 'signin') {
+  const { data: { user } } = await db.auth.getUser();
+  const el = document.getElementById('auth-content');
+
+  if (user && !user.is_anonymous) {
+    el.innerHTML = `
+      <div class="auth-signed-in">
+        <h2>Account</h2>
+        <div class="auth-email">${esc(user.email)}</div>
+        <div class="auth-type">Signed in with email</div>
+        <button class="auth-submit" onclick="handleSignOut()">Sign Out</button>
+      </div>
+    `;
+    return;
+  }
+
+  const isSignIn = activeTab === 'signin';
+  el.innerHTML = `
+    <h2>${user?.is_anonymous ? 'Save your data' : 'Account'}</h2>
+    <p>${isSignIn
+      ? 'Sign in to restore your data on this device.'
+      : 'Create an account to keep your data safe across devices.'
+    }</p>
+    <div class="auth-tabs">
+      <button class="auth-tab ${isSignIn ? 'active' : ''}" onclick="renderAuthModal('signin')">Sign In</button>
+      <button class="auth-tab ${!isSignIn ? 'active' : ''}" onclick="renderAuthModal('signup')">Sign Up</button>
+    </div>
+    <div class="auth-field">
+      <label>Email</label>
+      <input type="email" id="auth-email" placeholder="you@example.com">
+    </div>
+    <div class="auth-field">
+      <label>Password</label>
+      <input type="password" id="auth-password" placeholder="••••••••"
+        onkeydown="if(event.key==='Enter')${isSignIn ? 'handleSignIn()' : 'handleSignUp()'}">
+    </div>
+    <button class="auth-submit" id="auth-submit-btn" onclick="${isSignIn ? 'handleSignIn()' : 'handleSignUp()'}">
+      ${isSignIn ? 'Sign In' : 'Create Account'}
+    </button>
+    <div class="auth-msg" id="auth-msg"></div>
+  `;
+}
+
+async function handleSignIn() {
+  const email    = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const btn      = document.getElementById('auth-submit-btn');
+  if (!email || !password) { showAuthMsg('Please enter your email and password.', 'error'); return; }
+
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  const { error } = await db.auth.signInWithPassword({ email, password });
+  btn.disabled = false; btn.textContent = 'Sign In';
+
+  if (error) { showAuthMsg(error.message, 'error'); return; }
+  renderAuthModal();
+  updateAccountBtn();
+  await Promise.all([renderItems(), renderSchedule(), renderLog(), refreshSelects()]);
+}
+
+async function handleSignUp() {
+  const email    = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const btn      = document.getElementById('auth-submit-btn');
+  if (!email || !password) { showAuthMsg('Please enter your email and password.', 'error'); return; }
+  if (password.length < 6) { showAuthMsg('Password must be at least 6 characters.', 'error'); return; }
+
+  btn.disabled = true; btn.textContent = 'Creating account…';
+
+  // Upgrade anonymous session to email account (preserves existing data)
+  const { error } = await db.auth.updateUser({ email, password });
+  btn.disabled = false; btn.textContent = 'Create Account';
+
+  if (error) { showAuthMsg(error.message, 'error'); return; }
+  showAuthMsg('Account created! Check your email to confirm if required.', 'success');
+  updateAccountBtn();
+}
+
+async function handleSignOut() {
+  await db.auth.signOut();
+  // Create a fresh anonymous session
+  await db.auth.signInAnonymously();
+  closeAuthModal();
+  updateAccountBtn();
+  await Promise.all([renderItems(), renderSchedule(), renderLog(), refreshSelects()]);
+}
+
+function showAuthMsg(text, type) {
+  const el = document.getElementById('auth-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'auth-msg ' + type;
+}
+
+async function updateAccountBtn() {
+  const { data: { user } } = await db.auth.getUser();
+  const btn = document.getElementById('account-btn');
+  if (user && !user.is_anonymous) {
+    btn.textContent = user.email;
+  } else {
+    btn.textContent = 'Account';
+  }
+}
+
 // ─── Shared ───────────────────────────────────────────────────────────────────
 
 async function refreshSelects() {
@@ -589,4 +707,5 @@ function switchTab(tab) {
     String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
   await Promise.all([renderItems(), renderSchedule(), renderLog(), refreshSelects()]);
+  updateAccountBtn();
 })();

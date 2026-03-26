@@ -9,9 +9,22 @@
 <body>
 
 <header>
-  <h1>Dopamine Tracker</h1>
-  <p>Schedule quality activities first. Build momentum over time.</p>
+  <div class="header-main">
+    <div>
+      <h1>Dopamine Tracker</h1>
+      <p>Schedule quality activities first. Build momentum over time.</p>
+    </div>
+    <button class="btn-account" id="account-btn" onclick="openAuthModal()">Account</button>
+  </div>
 </header>
+
+<!-- ===== AUTH MODAL ===== -->
+<div id="auth-overlay" class="auth-overlay hidden" onclick="closeAuthModalIfOutside(event)">
+  <div class="auth-modal">
+    <button class="auth-close" onclick="closeAuthModal()">✕</button>
+    <div id="auth-content"></div>
+  </div>
+</div>
 
 <nav>
   <button class="active" onclick="switchTab('items')">Items</button>
